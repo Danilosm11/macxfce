@@ -22,7 +22,7 @@ O menu também aparece como **"Estilo da Dock"** no menu de aplicativos.
 ## Instalação
 
 ```sh
-git clone https://github.com/<você>/macxfce.git
+git clone https://github.com/Danilosm11/macxfce.git
 cd macxfce
 ./install.sh            # ou ./install.sh dark | light | glass
 ```
