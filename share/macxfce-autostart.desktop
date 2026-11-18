@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=macxfce
+Comment=Reaplica o estilo da dock e inicia o modo adaptativo
+Exec=env MACXFCE_NO_RESTART=1 @BIN@ apply
+OnlyShowIn=XFCE;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

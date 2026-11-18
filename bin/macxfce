@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# macxfce — customização macOS-like leve para XFCE.
+# Sem daemons pesados, sem rede, sem telemetria. GPL-3.0.
+set -euo pipefail
+export LC_ALL=C   # xfconf-query interpreta doubles conforme o locale (pt_BR usa vírgula)
+
+VERSION="1.0.0"
+PREFIX="${MACXFCE_PREFIX:-$HOME/.local/share/macxfce}"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/macxfce"
+CONF="$CONF_DIR/config"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/macxfce"
+BACKUP_DIR="$PREFIX/backup"
+GTK_CSS="${XDG_CONFIG_HOME:-$HOME/.config}/gtk-3.0/gtk.css"
+CSS_BEGIN="/* >>> macxfce >>> (gerado automaticamente — não edite dentro deste bloco) */"
+CSS_END="/* <<< macxfce <<< */"
+
+# wallcolor.py: instalado em $PREFIX/lib ou ao lado do repositório
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+WALLCOLOR="$PREFIX/lib/wallcolor.py"
+[[ -f "$SELF_DIR/../lib/wallcolor.py" ]] && WALLCOLOR="$SELF_DIR/../lib/wallcolor.py"
+
+mkdir -p "$CONF_DIR" "$STATE_DIR"
+[[ -f "$CONF" ]] || printf 'MODE=adaptive\nDOCK_PANEL=\nBAR_PANEL=\n' >"$CONF"
+# shellcheck source=/dev/null
+source "$CONF"
+
+xq() { xfconf-query -c xfce4-panel "$@"; }
+
+die() { echo "macxfce: $*" >&2; exit 1; }
+
+set_conf() { # chave valor
+    if grep -q "^$1=" "$CONF"; then sed -i "s|^$1=.*|$1=$2|" "$CONF"; else echo "$1=$2" >>"$CONF"; fi
+}
+
+# --- detecção dos painéis -------------------------------------------------
+panel_ids() { xq -p /panels 2>/dev/null | grep -E '^[0-9]+$'; }
+
+find_dock() {
+    [[ -n "${DOCK_PANEL:-}" ]] && { echo "$DOCK_PANEL"; return; }
+    local p id
+    for p in $(panel_ids); do
+        for id in $(xq -p "/panels/panel-$p/plugin-ids" 2>/dev/null | grep -E '^[0-9]+$'); do
+            case "$(xq -p "/plugins/plugin-$id" 2>/dev/null)" in
+                docklike|tasklist) echo "$p"; return ;;
+            esac
+        done
+    done
+    # fallback: painel na borda inferior (p=10/11/12)
+    for p in $(panel_ids); do
+        [[ "$(xq -p "/panels/panel-$p/position" 2>/dev/null)" =~ p=1[0-2] ]] && { echo "$p"; return; }
+    done
+}
+
+find_bar() {
+    [[ -n "${BAR_PANEL:-}" ]] && { echo "$BAR_PANEL"; return; }
+    local p dock; dock="$(find_dock)"
+    for p in $(panel_ids); do
+        [[ "$p" == "$dock" ]] && continue
+        [[ "$(xq -p "/panels/panel-$p/position" 2>/dev/null)" =~ p=(6|7|8)\; ]] && { echo "$p"; return; }
+    done
+}
+
+# --- wallpaper ------------------------------------------------------------
+current_wallpaper() {
+    local ws mon key img
+    ws="$(xprop -root _NET_CURRENT_DESKTOP 2>/dev/null | awk '{print $NF}')"; ws="${ws:-0}"
+    if [[ "$(xfconf-query -c xfce4-desktop -p /backdrop/single-workspace-mode 2>/dev/null)" == "true" ]]; then
+        ws="$(xfconf-query -c xfce4-desktop -p /backdrop/single-workspace-number 2>/dev/null || echo 0)"
+    fi
+    mon="$(xrandr --current 2>/dev/null | awk '/ connected primary/{print $1; exit}')"
+    [[ -z "$mon" ]] && mon="$(xrandr --current 2>/dev/null | awk '/ connected/{print $1; exit}')"
+    for key in "/backdrop/screen0/monitor$mon/workspace$ws/last-image" \
+               "/backdrop/screen0/monitor0/workspace$ws/last-image" \
+               "/backdrop/screen0/monitor0/last-image"; do
+        img="$(xfconf-query -c xfce4-desktop -p "$key" 2>/dev/null || true)"
+        [[ -n "$img" && -f "$img" ]] && { echo "$img"; return; }
+    done
+}
+
+# --- cores ----------------------------------------------------------------
+# sample <bottom|top> -> "r g b lum" (fallback: cinza escuro)
+sample() {
+    local img; img="$(current_wallpaper)"
+    if [[ -n "$img" ]] && out="$(python3 "$WALLCOLOR" "$img" "$1" 2>/dev/null)"; then echo "$out"
+    else echo "0.10 0.10 0.10 0.01"; fi
+}
+
+# mix r g b lum alpha -> "r g b a fg"   (tinge com a cor do wallpaper)
+adaptive_rgba() {
+    awk -v r="$1" -v g="$2" -v b="$3" -v l="$4" -v a="$5" 'BEGIN{
+        if (l < 0.30) { t=0.45; m=0.0;  fg="light" }   # wallpaper escuro: escurece
+        else          { t=0.55; m=1.0;  fg="dark"  }   # wallpaper claro: clareia
+        printf "%.3f %.3f %.3f %.2f %s\n", r+(m-r)*t, g+(m-g)*t, b+(m-b)*t, a, fg }'
+}
+
+# --- aplicação ------------------------------------------------------------
+set_rgba() { # painel r g b a
+    local p="$1"; shift
+    xq -p "/panels/panel-$p/background-style" -n -t uint -s 1
+    xq -p "/panels/panel-$p/background-rgba" -n \
+        -t double -t double -t double -t double -s "$1" -s "$2" -s "$3" -s "$4"
+}
+
+write_css() { # fg(light|dark)
+    local fg="$1" color tmp
+    [[ "$fg" == "dark" ]] && color="rgba(0,0,0,0.85)" || color="rgba(255,255,255,0.95)"
+    mkdir -p "$(dirname "$GTK_CSS")"; touch "$GTK_CSS"
+    tmp="$(mktemp)"
+    # remove nosso bloco antigo (e o bloco 'dock-like' legado, se existir)
+    awk -v b="$CSS_BEGIN" -v e="$CSS_END" '
+        $0==b {skip=1} /^\/\* >>> dock-like >>>/ {skip=1}
+        !skip {print}
+        $0==e {skip=0} /^\/\* <<< dock-like <<</ {skip=0}' "$GTK_CSS" >"$tmp"
+    cat >>"$tmp" <<EOF
+$CSS_BEGIN
+.xfce4-panel.background { border-radius: 14px; }
+.xfce4-panel.background button { border-radius: 10px; }
+.xfce4-panel.background label,
+.xfce4-panel.background button,
+.xfce4-panel.background image { color: $color; }
+$CSS_END
+EOF
+    if ! cmp -s "$tmp" "$GTK_CSS"; then
+        cp "$tmp" "$GTK_CSS"; rm -f "$tmp"; return 0   # mudou -> precisa reiniciar painel
+    fi
+    rm -f "$tmp"; return 1
+}
+
+apply_mode() {
+    local mode="$1" dock bar d b fg
+    dock="$(find_dock)"; bar="$(find_bar)"
+    [[ -n "$dock" ]] || die "nenhuma dock encontrada (defina DOCK_PANEL em $CONF)"
+    case "$mode" in
+        dark)  d="0.11 0.11 0.12 0.80"; b="0.07 0.07 0.08 0.60"; fg=light ;;
+        light) d="0.97 0.97 0.98 0.75"; b="0.98 0.98 0.99 0.72"; fg=dark ;;
+        glass)
+            read -r _ _ _ lum <<<"$(sample bottom)"
+            d="1.00 1.00 1.00 0.16"; b="0.00 0.00 0.00 0.14"
+            fg=$(awk -v l="$lum" 'BEGIN{print (l<0.45)?"light":"dark"}') ;;
+        adaptive)
+            read -r r g bb l <<<"$(sample bottom)"
+            read -r d1 d2 d3 d4 fg <<<"$(adaptive_rgba "$r" "$g" "$bb" "$l" 0.62)"
+            d="$d1 $d2 $d3 $d4"
+            read -r r g bb l <<<"$(sample top)"
+            read -r b1 b2 b3 b4 _ <<<"$(adaptive_rgba "$r" "$g" "$bb" "$l" 0.50)"
+            b="$b1 $b2 $b3 $b4" ;;
+        *) die "modo inválido: $mode (use adaptive|dark|light|glass)" ;;
+    esac
+    # shellcheck disable=SC2086
+    set_rgba "$dock" $d
+    # shellcheck disable=SC2086
+    [[ -n "$bar" ]] && set_rgba "$bar" $b
+    if write_css "$fg" && [[ "${MACXFCE_NO_RESTART:-0}" != 1 ]]; then
+        (xfce4-panel -r >/dev/null 2>&1 &)
+    fi
+}
+
+ensure_compositing() {
+    [[ "$(xfconf-query -c xfwm4 -p /general/use_compositing 2>/dev/null)" == "true" ]] ||
+        xfconf-query -c xfwm4 -p /general/use_compositing -s true
+}
+
+# --- watcher (só no modo adaptativo; orientado a eventos, sem polling) ----
+watch() {
+    exec 9>"$STATE_DIR/watch.lock"
+    flock -n 9 || exit 0      # já está rodando
+    [[ "$MODE" == "adaptive" ]] || exit 0
+    trap 'kill 0' EXIT
+    {
+        xfconf-query -c xfce4-desktop -m 2>/dev/null | grep --line-buffered 'last-image' &
+        xprop -root -spy _NET_CURRENT_DESKTOP 2>/dev/null &
+        wait
+    } | while read -r _; do
+        # agrupa eventos em rajada
+        while read -r -t 0.4 _; do :; done
+        source "$CONF"
+        [[ "$MODE" == "adaptive" ]] || exit 0
+        apply_mode adaptive || true
+    done
+}
+
+start_watch() {
+    command -v setsid >/dev/null && setsid -f "$0" watch >/dev/null 2>&1 || ("$0" watch >/dev/null 2>&1 &)
+}
+
+stop_watch() { pkill -f "macxfce watch" 2>/dev/null || true; }
+
+# --- backup / restore -----------------------------------------------------
+backup() {
+    [[ -f "$BACKUP_DIR/done" ]] && return 0
+    mkdir -p "$BACKUP_DIR"
+    local p
+    for p in $(panel_ids); do
+        for k in background-style background-rgba; do
+            if xq -p "/panels/panel-$p/$k" >/dev/null 2>&1; then
+                xq -p "/panels/panel-$p/$k" | grep -E '^[0-9.,-]+$' | paste -sd' ' >"$BACKUP_DIR/panel-$p.$k"
+            fi
+        done
+    done
+    xfconf-query -c xfwm4 -p /general/button_layout >"$BACKUP_DIR/button_layout" 2>/dev/null || true
+    [[ -f "$GTK_CSS" ]] && cp "$GTK_CSS" "$BACKUP_DIR/gtk.css"
+    touch "$BACKUP_DIR/done"
+}
+
+restore() {
+    [[ -f "$BACKUP_DIR/done" ]] || die "sem backup em $BACKUP_DIR"
+    stop_watch
+    local p v
+    for p in $(panel_ids); do
+        if [[ -f "$BACKUP_DIR/panel-$p.background-style" ]]; then
+            xq -p "/panels/panel-$p/background-style" -n -t uint -s "$(cat "$BACKUP_DIR/panel-$p.background-style")"
+        else xq -p "/panels/panel-$p/background-style" -r 2>/dev/null || true; fi
+        if [[ -f "$BACKUP_DIR/panel-$p.background-rgba" ]]; then
+            read -r -a v <<<"$(cat "$BACKUP_DIR/panel-$p.background-rgba")"
+            xq -p "/panels/panel-$p/background-rgba" -n -t double -t double -t double -t double \
+                -s "${v[0]}" -s "${v[1]}" -s "${v[2]}" -s "${v[3]}"
+        else xq -p "/panels/panel-$p/background-rgba" -r 2>/dev/null || true; fi
+    done
+    [[ -s "$BACKUP_DIR/button_layout" ]] &&
+        xfconf-query -c xfwm4 -p /general/button_layout -s "$(cat "$BACKUP_DIR/button_layout")"
+    if [[ -f "$BACKUP_DIR/gtk.css" ]]; then cp "$BACKUP_DIR/gtk.css" "$GTK_CSS"
+    elif [[ -f "$GTK_CSS" ]]; then
+        sed -i "\|^/\* >>> macxfce >>>|,\|^/\* <<< macxfce <<<|d" "$GTK_CSS"
+    fi
+    (xfce4-panel -r >/dev/null 2>&1 &)
+    echo "Configuração original restaurada."
+}
+
+# --- menu gráfico (zenity, opcional) --------------------------------------
+menu() {
+    command -v zenity >/dev/null || die "zenity não instalado; use: macxfce <modo>"
+    local choice
+    choice="$(zenity --list --radiolist --title="macxfce" --text="Estilo da dock" \
+        --column="" --column="Modo" --column="Descrição" --hide-column=2 --print-column=2 \
+        --width=380 --height=280 \
+        "$([[ $MODE == adaptive ]] && echo TRUE || echo FALSE)" adaptive "Adaptativo (segue o wallpaper)" \
+        "$([[ $MODE == dark ]] && echo TRUE || echo FALSE)" dark "Escuro" \
+        "$([[ $MODE == light ]] && echo TRUE || echo FALSE)" light "Claro" \
+        "$([[ $MODE == glass ]] && echo TRUE || echo FALSE)" glass "Translúcido (vidro)")" || exit 0
+    [[ -n "$choice" ]] && set_mode "$choice"
+}
+
+set_mode() {
+    local mode="$1"
+    case "$mode" in white|branco) mode=light ;; escuro) mode=dark ;;
+        translucent|translucido|translúcido) mode=glass ;; adaptativo|auto) mode=adaptive ;; esac
+    backup
+    ensure_compositing
+    set_conf MODE "$mode"; MODE="$mode"
+    apply_mode "$mode"
+    if [[ "$mode" == adaptive ]]; then start_watch; else stop_watch; fi
+    echo "modo: $mode"
+}
+
+usage() {
+    cat <<EOF
+macxfce $VERSION — visual macOS-like leve para XFCE
+
+uso: macxfce <comando>
+  adaptive | dark | light | glass   muda o estilo da dock e da barra superior
+  cycle                             alterna para o próximo modo
+  menu                              escolher modo numa janelinha (zenity)
+  status                            mostra modo e painéis detectados
+  apply                             reaplica o modo salvo (usado no login)
+  buttons left|right                botões da janela à esquerda (macOS) ou direita
+  restore                           volta à configuração anterior à instalação
+EOF
+}
+
+case "${1:-}" in
+    adaptive|dark|light|glass|white|branco|escuro|translucent|translucido|translúcido|adaptativo|auto)
+        set_mode "$1" ;;
+    cycle)
+        case "$MODE" in adaptive) set_mode dark ;; dark) set_mode light ;; light) set_mode glass ;; *) set_mode adaptive ;; esac ;;
+    apply)
+        MACXFCE_NO_RESTART="${MACXFCE_NO_RESTART:-0}" apply_mode "$MODE"
+        [[ "$MODE" == adaptive ]] && start_watch || true ;;
+    watch) watch ;;
+    menu) menu ;;
+    status)
+        echo "modo:       $MODE"
+        echo "dock:       painel $(find_dock)"
+        echo "barra:      painel $(find_bar)"
+        echo "wallpaper:  $(current_wallpaper)"
+        pgrep -f "macxfce watch" >/dev/null && echo "watcher:    ativo" || echo "watcher:    parado" ;;
+    buttons)
+        case "${2:-}" in
+            left)  backup; xfconf-query -c xfwm4 -p /general/button_layout -s "CHM|" ;;
+            right) xfconf-query -c xfwm4 -p /general/button_layout -s "O|HMC" ;;
+            *) die "uso: macxfce buttons left|right" ;;
+        esac ;;
+    restore) restore ;;
+    -v|--version) echo "$VERSION" ;;
+    *) usage ;;
+esac

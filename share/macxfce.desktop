@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Estilo da Dock
+Name[en]=Dock Style
+Comment=Adaptativo, escuro, claro ou translúcido
+Comment[en]=Adaptive, dark, light or translucent
+Exec=@BIN@ menu
+Icon=preferences-desktop-theme
+Categories=Settings;DesktopSettings;XFCE;
+Terminal=false
