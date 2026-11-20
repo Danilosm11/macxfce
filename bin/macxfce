@@ -114,8 +114,9 @@ write_css() { # fg(light|dark)
         $0==e {skip=0} /^\/\* <<< dock-like <<</ {skip=0}' "$GTK_CSS" >"$tmp"
     cat >>"$tmp" <<EOF
 $CSS_BEGIN
-.xfce4-panel.background { border-radius: 14px; }
-.xfce4-panel.background button { border-radius: 10px; }
+/* só a janela do painel: plugins externos (rede, som, bateria...) também usam
+   .xfce4-panel.background e virariam "bolinhas" separadas se arredondados */
+#XfcePanelWindow { border-radius: 14px; }
 .xfce4-panel.background label,
 .xfce4-panel.background button,
 .xfce4-panel.background image { color: $color; }
