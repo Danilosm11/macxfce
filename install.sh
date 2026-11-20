@@ -20,8 +20,7 @@ sed "s#@BIN@#$BIN/macxfce#" share/macxfce.desktop >"$APPS/macxfce.desktop"
 sed "s#@BIN@#$BIN/macxfce#" share/macxfce-autostart.desktop >"$AUTO/macxfce.desktop"
 
 MODE="${1:-adaptive}"
-"$BIN/macxfce" buttons left
 "$BIN/macxfce" "$MODE"
 echo
 echo "Instalado. Troque o modo com: macxfce adaptive|dark|light|glass  (ou 'macxfce menu')"
-echo "Para desfazer tudo: ./uninstall.sh"
+echo "Desativar: macxfce off   |   Reativar: macxfce on   |   Desinstalar: macxfce uninstall"

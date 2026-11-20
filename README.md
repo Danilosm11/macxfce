@@ -40,14 +40,16 @@ Instala só no seu usuário (`~/.local`), sem sudo. Requer XFCE ≥ 4.14 com com
 - O modo adaptativo roda um watcher orientado a eventos (`xfconf-query -m` + `xprop -spy`),
   sem polling; ele só existe enquanto o modo é `adaptive`.
 
-## Desinstalar
+## Ativar, desativar, desinstalar
 
-```sh
-./uninstall.sh
-```
+| Comando | O que faz |
+|---|---|
+| `macxfce off` (ou `desativar`) | Volta ao visual original (cores, `gtk.css`, botões) e para o watcher. Continua instalado. |
+| `macxfce on` (ou `ativar` / `reativar`) | Liga de novo no último modo usado. Faz um novo backup do visual atual antes. |
+| `macxfce uninstall` (ou `desinstalar`, `./uninstall.sh`) | Desativa e apaga tudo de `~/.local` e `~/.config`. |
 
-Restaura o backup feito na primeira execução (cores dos painéis, `gtk.css`, layout dos botões).
-`macxfce buttons right` devolve só os botões das janelas para a direita.
+Escolher um modo (`macxfce dark` etc.) com ele desligado também reativa.
+`macxfce buttons right` deixa os botões das janelas à direita mesmo com o resto ativo.
 
 ## Licença
 

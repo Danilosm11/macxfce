@@ -4,7 +4,7 @@
 set -euo pipefail
 export LC_ALL=C   # xfconf-query interpreta doubles conforme o locale (pt_BR usa vírgula)
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 PREFIX="${MACXFCE_PREFIX:-$HOME/.local/share/macxfce}"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/macxfce"
 CONF="$CONF_DIR/config"
@@ -20,9 +20,10 @@ WALLCOLOR="$PREFIX/lib/wallcolor.py"
 [[ -f "$SELF_DIR/../lib/wallcolor.py" ]] && WALLCOLOR="$SELF_DIR/../lib/wallcolor.py"
 
 mkdir -p "$CONF_DIR" "$STATE_DIR"
-[[ -f "$CONF" ]] || printf 'MODE=adaptive\nDOCK_PANEL=\nBAR_PANEL=\n' >"$CONF"
+[[ -f "$CONF" ]] || printf 'ENABLED=0\nMODE=adaptive\nBUTTONS=left\nDOCK_PANEL=\nBAR_PANEL=\n' >"$CONF"
 # shellcheck source=/dev/null
 source "$CONF"
+ENABLED="${ENABLED:-1}"; BUTTONS="${BUTTONS:-left}"
 
 xq() { xfconf-query -c xfce4-panel "$@"; }
 
@@ -165,7 +166,8 @@ watch() {
     exec 9>"$STATE_DIR/watch.lock"
     flock -n 9 || exit 0      # já está rodando
     [[ "$MODE" == "adaptive" ]] || exit 0
-    trap 'kill 0' EXIT
+    echo $$ >"$STATE_DIR/watch.pid"
+    trap 'rm -f "$STATE_DIR/watch.pid"; kill 0' EXIT
     {
         xfconf-query -c xfce4-desktop -m 2>/dev/null | grep --line-buffered 'last-image' &
         xprop -root -spy _NET_CURRENT_DESKTOP 2>/dev/null &
@@ -183,7 +185,18 @@ start_watch() {
     command -v setsid >/dev/null && setsid -f "$0" watch >/dev/null 2>&1 || ("$0" watch >/dev/null 2>&1 &)
 }
 
-stop_watch() { pkill -f "macxfce watch" 2>/dev/null || true; }
+watch_pid() { # imprime o PID do watcher se estiver vivo
+    local pid; pid="$(cat "$STATE_DIR/watch.pid" 2>/dev/null)" || return 1
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+stop_watch() {
+    local pid pgid; pid="$(watch_pid)" || return 0
+    pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
+    if [[ "$pgid" == "$pid" ]]; then kill -- "-$pgid" 2>/dev/null   # grupo próprio (setsid)
+    else pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; fi
+    rm -f "$STATE_DIR/watch.pid"
+}
 
 # --- backup / restore -----------------------------------------------------
 backup() {
@@ -222,8 +235,39 @@ restore() {
     elif [[ -f "$GTK_CSS" ]]; then
         sed -i "\|^/\* >>> macxfce >>>|,\|^/\* <<< macxfce <<<|d" "$GTK_CSS"
     fi
+    rm -rf "$BACKUP_DIR"
     (xfce4-panel -r >/dev/null 2>&1 &)
-    echo "Configuração original restaurada."
+}
+
+# --- ativar / desativar / desinstalar -------------------------------------
+apply_buttons() {
+    case "$BUTTONS" in
+        left)  xfconf-query -c xfwm4 -p /general/button_layout -s "CHM|" ;;
+        right) xfconf-query -c xfwm4 -p /general/button_layout -s "O|HMC" ;;
+    esac
+}
+
+enable() {
+    backup
+    set_conf ENABLED 1; ENABLED=1
+    apply_buttons
+    set_mode "$MODE" >/dev/null
+    echo "macxfce ativado (modo: $MODE). Desative com: macxfce off"
+}
+
+disable() {
+    stop_watch
+    if [[ -f "$BACKUP_DIR/done" ]]; then restore; fi
+    set_conf ENABLED 0; ENABLED=0
+    echo "macxfce desativado: visual original restaurado. Reative com: macxfce on"
+}
+
+uninstall() {
+    [[ "$ENABLED" == 1 || -f "$BACKUP_DIR/done" ]] && disable >/dev/null
+    rm -f "$HOME/.local/bin/macxfce" "$HOME/.local/share/applications/macxfce.desktop" \
+          "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/macxfce.desktop"
+    rm -rf "$PREFIX" "$CONF_DIR" "$STATE_DIR"
+    echo "macxfce desinstalado e visual original restaurado."
 }
 
 # --- menu gráfico (zenity, opcional) --------------------------------------
@@ -232,12 +276,13 @@ menu() {
     local choice
     choice="$(zenity --list --radiolist --title="macxfce" --text="Estilo da dock" \
         --column="" --column="Modo" --column="Descrição" --hide-column=2 --print-column=2 \
-        --width=380 --height=280 \
+        --width=380 --height=320 \
         "$([[ $MODE == adaptive ]] && echo TRUE || echo FALSE)" adaptive "Adaptativo (segue o wallpaper)" \
         "$([[ $MODE == dark ]] && echo TRUE || echo FALSE)" dark "Escuro" \
         "$([[ $MODE == light ]] && echo TRUE || echo FALSE)" light "Claro" \
-        "$([[ $MODE == glass ]] && echo TRUE || echo FALSE)" glass "Translúcido (vidro)")" || exit 0
-    [[ -n "$choice" ]] && set_mode "$choice"
+        "$([[ $MODE == glass ]] && echo TRUE || echo FALSE)" glass "Translúcido (vidro)" \
+        FALSE off "Desativar (visual original)")" || exit 0
+    case "$choice" in off) disable ;; ?*) set_mode "$choice" ;; esac
 }
 
 set_mode() {
@@ -247,6 +292,7 @@ set_mode() {
     backup
     ensure_compositing
     set_conf MODE "$mode"; MODE="$mode"
+    if [[ "$ENABLED" != 1 ]]; then set_conf ENABLED 1; ENABLED=1; apply_buttons; fi
     apply_mode "$mode"
     if [[ "$mode" == adaptive ]]; then start_watch; else stop_watch; fi
     echo "modo: $mode"
@@ -257,13 +303,15 @@ usage() {
 macxfce $VERSION — visual macOS-like leve para XFCE
 
 uso: macxfce <comando>
+  on    | ativar | reativar         liga a customização (modo salvo: $MODE)
+  off   | desativar                 volta ao visual original, mas mantém instalado
+  uninstall | desinstalar           desliga e remove tudo do sistema
   adaptive | dark | light | glass   muda o estilo da dock e da barra superior
   cycle                             alterna para o próximo modo
   menu                              escolher modo numa janelinha (zenity)
   status                            mostra modo e painéis detectados
   apply                             reaplica o modo salvo (usado no login)
   buttons left|right                botões da janela à esquerda (macOS) ou direita
-  restore                           volta à configuração anterior à instalação
 EOF
 }
 
@@ -272,24 +320,27 @@ case "${1:-}" in
         set_mode "$1" ;;
     cycle)
         case "$MODE" in adaptive) set_mode dark ;; dark) set_mode light ;; light) set_mode glass ;; *) set_mode adaptive ;; esac ;;
+    on|ativar|reativar|enable) enable ;;
+    off|desativar|disable) disable ;;
+    uninstall|desinstalar) uninstall ;;
     apply)
-        MACXFCE_NO_RESTART="${MACXFCE_NO_RESTART:-0}" apply_mode "$MODE"
+        [[ "$ENABLED" == 1 ]] || exit 0
+        apply_mode "$MODE"
         [[ "$MODE" == adaptive ]] && start_watch || true ;;
     watch) watch ;;
     menu) menu ;;
     status)
+        echo "ativo:      $([[ $ENABLED == 1 ]] && echo sim || echo não)"
         echo "modo:       $MODE"
         echo "dock:       painel $(find_dock)"
         echo "barra:      painel $(find_bar)"
         echo "wallpaper:  $(current_wallpaper)"
-        pgrep -f "macxfce watch" >/dev/null && echo "watcher:    ativo" || echo "watcher:    parado" ;;
+        watch_pid >/dev/null && echo "watcher:    ativo" || echo "watcher:    parado" ;;
     buttons)
         case "${2:-}" in
-            left)  backup; xfconf-query -c xfwm4 -p /general/button_layout -s "CHM|" ;;
-            right) xfconf-query -c xfwm4 -p /general/button_layout -s "O|HMC" ;;
+            left|right) set_conf BUTTONS "$2"; BUTTONS="$2"; [[ "$ENABLED" == 1 ]] && apply_buttons ;;
             *) die "uso: macxfce buttons left|right" ;;
         esac ;;
-    restore) restore ;;
     -v|--version) echo "$VERSION" ;;
     *) usage ;;
 esac
